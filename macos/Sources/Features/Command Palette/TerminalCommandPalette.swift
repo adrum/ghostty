@@ -64,7 +64,7 @@ struct TerminalCommandPaletteView: View {
         // Sort the rest. We replace ":" with a character that sorts before space
         // so that "Foo:" sorts before "Foo Bar:". Use sortKey as a tie-breaker
         // for stable ordering when titles are equal.
-        options.append(contentsOf: (jumpOptions + terminalOptions).sorted { a, b in
+        options.append(contentsOf: (jumpOptions + moveTabOptions + terminalOptions).sorted { a, b in
             let aNormalized = a.title.replacingOccurrences(of: ":", with: "\t")
             let bNormalized = b.title.replacingOccurrences(of: ":", with: "\t")
             let comparison = aNormalized.localizedCaseInsensitiveCompare(bNormalized)
@@ -121,11 +121,53 @@ struct TerminalCommandPaletteView: View {
         return options
     }
 
+    /// The window controller hosting the surface this palette is presented over.
+    /// Used to decide which window-scoped commands apply.
+    private var windowController: NSWindowController? {
+        surfaceView.window?.windowController
+    }
+
+    /// Commands for moving the current tab between a regular window and the
+    /// quick terminal. These two are inverses of each other, so only the one
+    /// that applies to where the palette was opened is offered.
+    private var moveTabOptions: [CommandOption] {
+        if let quickController = windowController as? QuickTerminalController {
+            let tabManager = quickController.tabManager
+            guard let tab = tabManager.currentTab else { return [] }
+            return [CommandOption(
+                title: "Move Tab to New Window",
+                description: "Move the current quick terminal tab to a new window.",
+                leadingIcon: "macwindow"
+            ) {
+                tabManager.moveTabToNewWindow(tab)
+            }]
+        }
+
+        if let terminalController = windowController as? TerminalController {
+            return [CommandOption(
+                title: "Move Tab to Quick Terminal",
+                description: "Move the current tab to the quick terminal.",
+                leadingIcon: "arrow.up.to.line"
+            ) {
+                terminalController.moveTabToQuickTerminal(nil)
+            }]
+        }
+
+        return []
+    }
+
     /// Custom commands from the command-palette-entry configuration.
     private var terminalOptions: [CommandOption] {
         guard let appDelegate = NSApp.delegate as? AppDelegate else { return [] }
+
+        // In the quick terminal we provide our own "Move Tab to New Window"
+        // above, which operates on quick terminal tabs. Drop the core action
+        // entry so it isn't listed twice.
+        let inQuickTerminal = windowController is QuickTerminalController
+
         return appDelegate.ghostty.config.commandPaletteEntries
             .filter(\.isSupported)
+            .filter { !inQuickTerminal || $0.actionKey != "move_tab_to_new_window" }
             .map { c in
                 let symbols = appDelegate.ghostty.config.keyboardShortcut(for: c.action)?.keyList
                 return CommandOption(
