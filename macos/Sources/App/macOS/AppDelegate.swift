@@ -113,6 +113,17 @@ class AppDelegate: NSObject,
         return false
     }
 
+    /// The quick terminal controller, but only if it already exists. Unlike
+    /// `quickController` this never initializes one, so it's safe to call from
+    /// places that only want to inspect the quick terminal (such as the
+    /// command palette).
+    var quickControllerIfCreated: QuickTerminalController? {
+        if case .initialized(let controller) = quickTerminalControllerState {
+            return controller
+        }
+        return nil
+    }
+
     /// Our quick terminal. This starts out uninitialized and only initializes if used.
     var quickController: QuickTerminalController {
         switch quickTerminalControllerState {

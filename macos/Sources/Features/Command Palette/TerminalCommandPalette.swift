@@ -180,8 +180,14 @@ struct TerminalCommandPaletteView: View {
             }
     }
 
-    /// Commands for jumping to other terminal surfaces.
+    /// Commands for jumping to other terminal surfaces, both in regular
+    /// windows and in the quick terminal.
     private var jumpOptions: [CommandOption] {
+        windowJumpOptions + quickTerminalJumpOptions
+    }
+
+    /// Commands for jumping to surfaces in regular terminal windows.
+    private var windowJumpOptions: [CommandOption] {
         TerminalController.all.flatMap { controller -> [CommandOption] in
             guard let window = controller.window else { return [] }
 
@@ -216,6 +222,53 @@ struct TerminalCommandPaletteView: View {
                         name: Ghostty.Notification.ghosttyPresentTerminal,
                         object: surface
                     )
+                }
+            }
+        }
+    }
+
+    /// Commands for jumping to surfaces in the quick terminal. Only lists the
+    /// quick terminal if it already exists; it is never initialized just to be
+    /// listed here.
+    private var quickTerminalJumpOptions: [CommandOption] {
+        guard let quickController = (NSApp.delegate as? AppDelegate)?.quickControllerIfCreated
+        else { return [] }
+
+        let tabManager = quickController.tabManager
+        return tabManager.tabs.flatMap { tab -> [CommandOption] in
+            tabManager.liveSurfaceTree(for: tab).map { surface in
+                let displayTitle: String
+                if let override = tab.titleOverride, !override.isEmpty {
+                    displayTitle = override
+                } else if !surface.title.isEmpty {
+                    displayTitle = surface.title
+                } else {
+                    displayTitle = tab.title
+                }
+                let pwd = surface.pwd?.abbreviatedPath
+                let subtitle: String? = if let pwd, !displayTitle.contains(pwd) {
+                    pwd
+                } else {
+                    nil
+                }
+
+                return CommandOption(
+                    title: "Focus: \(displayTitle)",
+                    subtitle: subtitle,
+                    leadingIcon: "bolt.fill",
+                    leadingColor: tab.tabColor.displayColor.map { Color($0) },
+                    badge: "Quick Terminal",
+                    sortKey: AnySortKey(ObjectIdentifier(surface))
+                ) {
+                    tabManager.selectTab(tab)
+
+                    // `selectTab` restores that tab's own focused surface
+                    // asynchronously, so defer ours to make sure the surface
+                    // the user actually picked is the one left focused. This
+                    // also animates the quick terminal in if it is hidden.
+                    DispatchQueue.main.async {
+                        quickController.focusSurface(surface)
+                    }
                 }
             }
         }
