@@ -64,19 +64,25 @@ struct TerminalCommandPaletteView: View {
         // Sort the rest. We replace ":" with a character that sorts before space
         // so that "Foo:" sorts before "Foo Bar:". Use sortKey as a tie-breaker
         // for stable ordering when titles are equal.
-        options.append(contentsOf: (jumpOptions + moveTabOptions + terminalOptions).sorted { a, b in
-            let aNormalized = a.title.replacingOccurrences(of: ":", with: "\t")
-            let bNormalized = b.title.replacingOccurrences(of: ":", with: "\t")
-            let comparison = aNormalized.localizedCaseInsensitiveCompare(bNormalized)
+        //
+        // The normalized titles are computed up front rather than inside the
+        // comparator: there are a few hundred options, and a comparison sort
+        // would otherwise rebuild both strings on every one of the ~n log n
+        // comparisons.
+        let sortable = (jumpOptions + moveTabOptions + terminalOptions).map { option in
+            (normalizedTitle: option.title.replacingOccurrences(of: ":", with: "\t"), option: option)
+        }
+        options.append(contentsOf: sortable.sorted { a, b in
+            let comparison = a.normalizedTitle.localizedCaseInsensitiveCompare(b.normalizedTitle)
             if comparison != .orderedSame {
                 return comparison == .orderedAscending
             }
             // Tie-breaker: use sortKey if both have one
-            if let aSortKey = a.sortKey, let bSortKey = b.sortKey {
+            if let aSortKey = a.option.sortKey, let bSortKey = b.option.sortKey {
                 return aSortKey < bSortKey
             }
             return false
-        })
+        }.map(\.option))
         return options
     }
 
