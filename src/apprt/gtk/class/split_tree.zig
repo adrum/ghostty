@@ -17,6 +17,7 @@ const Application = @import("application.zig").Application;
 const CloseConfirmationDialog = @import("close_confirmation_dialog.zig").CloseConfirmationDialog;
 const Surface = @import("surface.zig").Surface;
 const SurfaceScrolledWindow = @import("surface_scrolled_window.zig").SurfaceScrolledWindow;
+const Overrides = @import("Overrides.zig");
 
 const log = std.log.scoped(.gtk_ghostty_split_tree);
 
@@ -212,19 +213,14 @@ pub const SplitTree = extern struct {
         self: *Self,
         direction: Surface.Tree.Split.Direction,
         parent_: ?*Surface,
-        overrides: struct {
-            command: ?configpkg.Command = null,
-            working_directory: ?[:0]const u8 = null,
-            title: ?[:0]const u8 = null,
-
-            pub const none: @This() = .{};
-        },
+        overrides: Overrides,
     ) Allocator.Error!void {
         const alloc = Application.default().allocator();
 
         // Create our new surface.
         const surface: *Surface = .new(.{
             .command = overrides.command,
+            .shell_integration = overrides.shell_integration,
             .working_directory = overrides.working_directory,
             .title = overrides.title,
         });
@@ -239,12 +235,7 @@ pub const SplitTree = extern struct {
         }
 
         // Bind is-split property for new surface
-        _ = self.as(gobject.Object).bindProperty(
-            "is-split",
-            surface.as(gobject.Object),
-            "is-split",
-            .{ .sync_create = true },
-        );
+        surface.bindIsSplit(self);
 
         // Create our tree
         var single_tree = try Surface.Tree.init(alloc, surface);
@@ -452,6 +443,9 @@ pub const SplitTree = extern struct {
             // Finally, set the final tree structures for both tree widgets
             source_tree_widget.setTree(&new_source_tree);
             self.setTree(&after_split);
+
+            // Re-bind vital properties like `is-split`
+            source.bindIsSplit(self);
         }
     }
 
@@ -647,7 +641,7 @@ pub const SplitTree = extern struct {
 
     fn dispose(self: *Self) callconv(.c) void {
         const priv = self.private();
-        priv.last_focused.set(null);
+        priv.last_focused.deinit();
         if (priv.rebuild_source) |v| {
             if (glib.Source.remove(v) == 0) {
                 log.warn("unable to remove rebuild source", .{});
