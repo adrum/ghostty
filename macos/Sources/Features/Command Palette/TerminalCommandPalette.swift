@@ -1,6 +1,26 @@
 import SwiftUI
 import GhosttyKit
 
+func sortedTerminalPaletteOptions(_ options: [CommandOption]) -> [CommandOption] {
+    // The normalized titles are computed up front rather than inside the
+    // comparator: there are a few hundred options, and a comparison sort
+    // would otherwise rebuild both strings on every one of the ~n log n
+    // comparisons.
+    let sortable = options.map { option in
+        (title: option.title.replacingOccurrences(of: ":", with: "\t"), option: option)
+    }
+    return sortable.sorted { lhs, rhs in
+        let comparison = lhs.title.localizedCaseInsensitiveCompare(rhs.title)
+        if comparison != .orderedSame {
+            return comparison == .orderedAscending
+        }
+        if let lhsKey = lhs.option.sortKey, let rhsKey = rhs.option.sortKey {
+            return lhsKey < rhsKey
+        }
+        return false
+    }.map(\.option)
+}
+
 struct TerminalCommandPaletteView: View {
     /// The surface that this command palette represents.
     let surfaceView: Ghostty.SurfaceView
@@ -64,25 +84,7 @@ struct TerminalCommandPaletteView: View {
         // Sort the rest. We replace ":" with a character that sorts before space
         // so that "Foo:" sorts before "Foo Bar:". Use sortKey as a tie-breaker
         // for stable ordering when titles are equal.
-        //
-        // The normalized titles are computed up front rather than inside the
-        // comparator: there are a few hundred options, and a comparison sort
-        // would otherwise rebuild both strings on every one of the ~n log n
-        // comparisons.
-        let sortable = (jumpOptions + moveTabOptions + terminalOptions).map { option in
-            (normalizedTitle: option.title.replacingOccurrences(of: ":", with: "\t"), option: option)
-        }
-        options.append(contentsOf: sortable.sorted { a, b in
-            let comparison = a.normalizedTitle.localizedCaseInsensitiveCompare(b.normalizedTitle)
-            if comparison != .orderedSame {
-                return comparison == .orderedAscending
-            }
-            // Tie-breaker: use sortKey if both have one
-            if let aSortKey = a.option.sortKey, let bSortKey = b.option.sortKey {
-                return aSortKey < bSortKey
-            }
-            return false
-        }.map(\.option))
+        options.append(contentsOf: sortedTerminalPaletteOptions(jumpOptions + moveTabOptions + terminalOptions))
         return options
     }
 
@@ -222,7 +224,7 @@ struct TerminalCommandPaletteView: View {
                     subtitle: subtitle,
                     leadingIcon: "rectangle.on.rectangle",
                     leadingColor: displayColor?.displayColor.map { Color($0) },
-                    sortKey: AnySortKey(ObjectIdentifier(surface))
+                    sortKey: ObjectIdentifier(surface)
                 ) {
                     NotificationCenter.default.post(
                         name: Ghostty.Notification.ghosttyPresentTerminal,
@@ -264,7 +266,7 @@ struct TerminalCommandPaletteView: View {
                     leadingIcon: "bolt.fill",
                     leadingColor: tab.tabColor.displayColor.map { Color($0) },
                     badge: "Quick Terminal",
-                    sortKey: AnySortKey(ObjectIdentifier(surface))
+                    sortKey: ObjectIdentifier(surface)
                 ) {
                     tabManager.selectTab(tab)
 
