@@ -558,9 +558,18 @@ pub fn init(
         break :size size;
     };
 
+    // Initialize the render device if it hasn't been initialized already
+    const render_device = app.device orelse device: {
+        const device_options = try rt_surface.renderDeviceOptions();
+        const device: *rendererpkg.Device = try .init(alloc, device_options);
+        app.device = device;
+        break :device device;
+    };
+
     // Create our terminal grid with the initial size
     const app_mailbox: App.Mailbox = .{ .rt_app = rt_app, .mailbox = &app.mailbox };
     var renderer_impl = try Renderer.init(alloc, .{
+        .device = render_device,
         .config = try .init(alloc, config),
         .font_grid = font_grid,
         .size = size,
@@ -817,8 +826,13 @@ pub fn deinit(self: *Surface) void {
 
     // We need to deinit AFTER everything is stopped, since there are
     // shared values between the two threads.
-    self.renderer_thread.deinit();
+    //
+    // The renderer must be deinitialized before the renderer thread:
+    // on macOS the renderer's display link callback points at the
+    // thread's `draw_now` handle, and the renderer's deinit is what
+    // stops the display link for good.
     self.renderer.deinit();
+    self.renderer_thread.deinit();
     self.io_thread.deinit();
     self.mouse.selection_gesture.deinit(&self.io.terminal);
     self.io.deinit();
@@ -4272,6 +4286,10 @@ fn maybePromptClick(self: *Surface) !bool {
     // prompt clicks because we can't move if we're not in a prompt!
     if (!t.cursorIsAtPrompt()) return false;
 
+    // A press reported under mouse tracking resets the gesture, and its
+    // release must be reported too rather than moving the cursor.
+    if (self.mouse.selection_gesture.left_click_count == 0) return false;
+
     // If the left click moved away from its pressed cell then releasing the
     // mouse completes the drag gesture and we don't do prompt moving.
     if (self.mouse.selection_gesture.left_click_dragged) return false;
@@ -4332,7 +4350,10 @@ fn maybePromptClick(self: *Surface) !bool {
             // This matches what Kitty sends.
             const key: u8, const y: u32 = switch (v) {
                 .absolute => .{ 1, pos_vp.y +| 1 },
-                .relative => .{ 2, pos_vp.y -| prompt_pin.y +| 1 },
+                .relative => .{
+                    2,
+                    promptClickRelativeRow(&screen.pages, prompt_pin, click_pin),
+                },
             };
             var data: termio.Message.WriteReq.Small.Array = undefined;
             const resp = try std.fmt.bufPrint(
@@ -4375,6 +4396,17 @@ fn maybePromptClick(self: *Surface) !bool {
     }
 
     return true;
+}
+
+/// Returns the one-based SGR row for a click at or below the prompt.
+fn promptClickRelativeRow(
+    pages: *const terminal.PageList,
+    prompt_pin: terminal.Pin,
+    click_pin: terminal.Pin,
+) u32 {
+    const prompt_y = pages.pointFromPin(.screen, prompt_pin).?.screen.y;
+    const click_y = pages.pointFromPin(.screen, click_pin).?.screen.y;
+    return click_y - prompt_y + 1;
 }
 
 const Link = struct {
@@ -5790,7 +5822,7 @@ fn writeScreenFile(
     var retain_tmp_dir = false;
     defer if (retain_tmp_dir) tmp_dir.close(.retain) else tmp_dir.deinit();
 
-    var filename_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var filename_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const filename = try std.fmt.bufPrint(
         &filename_buf,
         "{s}.{s}",
@@ -5883,7 +5915,7 @@ fn writeScreenFile(
     try buf_writer.flush();
 
     // Get the final path
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = path_buf[0..try tmp_dir.dir.realPathFile(
         global.io(),
         filename,
@@ -5935,8 +5967,8 @@ pub const CompleteClipboard = struct {
     ///
     ///   - For "regular" pasting this means that unsafe pastes are
     ///     allowed. Unsafe data is defined as data that contains
-    ///     newlines, though this definition may change later to detect
-    ///     other scenarios.
+    ///     line terminators (newlines or carriage returns), though
+    ///     this definition may change later to detect other scenarios.
     ///
     ///   - For OSC 52 and Kitty clipboard protocol reads and writes no
     ///     prompt is shown to the user when this is true.
@@ -6632,4 +6664,45 @@ test "queueIo frees allocated writes in readonly mode" {
         .alloc = testing.allocator,
         .data = data,
     } }, .unlocked);
+}
+
+test "promptClickRelativeRow" {
+    const testing = std.testing;
+    const Case = struct {
+        layout: enum { no_history, offset, cross_page, prompt_above_viewport },
+        click_y: u32,
+        expected: u32,
+    };
+    const cases = [_]Case{
+        .{ .layout = .no_history, .click_y = 1, .expected = 1 },
+        .{ .layout = .offset, .click_y = 3, .expected = 3 },
+        .{ .layout = .cross_page, .click_y = 3, .expected = 3 },
+        .{ .layout = .prompt_above_viewport, .click_y = 0, .expected = 3 },
+    };
+    for (cases) |case| {
+        var pages = try terminal.PageList.init(testing.allocator, .{
+            .cols = 80,
+            .rows = 5,
+        });
+        defer pages.deinit();
+        const scroll_rows: u32 = switch (case.layout) {
+            .no_history => 0,
+            .offset, .prompt_above_viewport => 10,
+            .cross_page => pages.pages.first.?.capacity().rows - 2,
+        };
+        for (0..scroll_rows) |_| _ = try pages.grow();
+
+        const prompt_y = if (case.layout == .prompt_above_viewport)
+            scroll_rows - 2
+        else
+            scroll_rows + 1;
+        const prompt = pages.pin(.{ .screen = .{ .y = prompt_y } }).?;
+        const click = pages.pin(.{ .viewport = .{ .x = 7, .y = case.click_y } }).?;
+        try testing.expectEqual(case.layout == .cross_page, prompt.node != click.node);
+        try testing.expectEqual(
+            case.layout == .prompt_above_viewport,
+            pages.pointFromPin(.viewport, prompt) == null,
+        );
+        try testing.expectEqual(case.expected, promptClickRelativeRow(&pages, prompt, click));
+    }
 }
